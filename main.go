@@ -135,7 +135,13 @@ func main() {
 
 		filePath := filepath.Join(downloadDir, originalFilename)
 
-		err = downloadFile(downloadURL, filePath)
+		if _, err := os.Stat(filePath); err == nil {
+			fmt.Println("  File already exists, skipping download")
+			successCount++
+			continue
+		}
+
+		err = downloadFile(downloadURL, filePath, 3)
 		if err != nil {
 			fmt.Printf("  Error downloading: %v\n", err)
 			failCount++
@@ -173,7 +179,14 @@ func main() {
 				originalFilename = fmt.Sprintf("cover_%d.jpg", i)
 			}
 
-			err = downloadFile(imgURL, filepath.Join(imageDir, originalFilename))
+			imagePath := filepath.Join(imageDir, originalFilename)
+
+			if _, err := os.Stat(imagePath); err == nil {
+				fmt.Printf("Image already exists, skipping: %s\n", originalFilename)
+				continue
+			}
+
+			err = downloadFile(imgURL, imagePath, 3)
 			if err != nil {
 				fmt.Printf("Error downloading image %s: %v\n", imgURL, err)
 			} else {
@@ -305,7 +318,31 @@ func fetchHTML(url string) (*goquery.Document, error) {
 	return goquery.NewDocumentFromReader(resp.Body)
 }
 
-func downloadFile(fileURL, filepath string) error {
+func downloadFile(fileURL, filepath string, maxRetries int) error {
+	var lastErr error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if attempt > 1 {
+			// Exponential backoff: 1s, 2s, 4s
+			backoffDuration := time.Duration((1 << (attempt - 2))) * time.Second
+			fmt.Printf("  Retry attempt %d/%d in %v...\n", attempt, maxRetries, backoffDuration)
+			time.Sleep(backoffDuration)
+		}
+
+		lastErr = downloader(fileURL, filepath)
+		if lastErr == nil {
+			return nil
+		}
+	}
+
+	// Clean up
+	tmpPath := filepath + ".tmp"
+	os.Remove(tmpPath)
+
+	return fmt.Errorf("download failed after %d attempts: %v", maxRetries, lastErr)
+}
+
+func downloader(fileURL, filepath string) error {
 	// Parse URL to handle relative paths
 	parsedURL, err := url.Parse(fileURL)
 	if err != nil {
@@ -315,6 +352,8 @@ func downloadFile(fileURL, filepath string) error {
 	if parsedURL.Scheme == "" {
 		fileURL = "https://downloads.khinsider.com" + fileURL
 	}
+
+	tmpPath := filepath + ".tmp"
 
 	client := &http.Client{
 		Timeout: 60 * time.Second,
@@ -338,13 +377,24 @@ func downloadFile(fileURL, filepath string) error {
 		return fmt.Errorf("status code: %d", resp.StatusCode)
 	}
 
-	out, err := os.Create(filepath)
+	out, err := os.Create(tmpPath)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
 
 	_, err = io.Copy(out, resp.Body)
+	out.Close()
+
+	if err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+
+	// Rename to final filename after successful download
+	err = os.Rename(tmpPath, filepath)
+	if err != nil {
+		os.Remove(tmpPath)
+	}
 	return err
 }
 
